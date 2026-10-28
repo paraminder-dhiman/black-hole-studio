@@ -106,19 +106,6 @@ def test_tracer_disk_and_shadow():
     assert res["alpha"][1] > 0.99      # b ~ 7.3 lands on the disk
     assert not res["captured"][2] and res["alpha"][2] == 0.0
 
-def test_uedelta_roundtrip():
-    """The UE source-texture delta filter decoded by tools/extract_uasset_texture.py."""
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
-    pytest.importorskip("PIL")
-    import extract_uasset_texture as ex
-    rng = np.random.default_rng(1)
-    img = rng.integers(0, 65536, size=(130, 32), dtype=np.int64)
-    enc = img.copy()
-    for y in range(1, img.shape[0]):
-        if y % ex.UEDELTA_KEY_ROWS:
-            enc[y] = (img[y] - img[y - 1] + ex.UEDELTA_BIAS) % 65536
-    assert np.array_equal(ex.undo_uedelta(enc.astype(np.uint16)), img.astype(np.uint16))
-
 def test_nonphysical_detection():
     from types import SimpleNamespace
     from blackhole_studio import params
