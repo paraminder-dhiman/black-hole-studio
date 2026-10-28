@@ -1,0 +1,6 @@
+__pychace__/
+*.pyc
+dist/
+smoke_renders/
+docs/.figure_cache/
+.pytest_cache/
