@@ -10,7 +10,7 @@ A Blender extension that adds a physically based black hole in one click. Light 
 
 ## Documentation
 
-| | |
+| Document | What's inside |
 |---|---|
 | [**Quick Start**](docs/quick_start.md) ([PDF](docs/quick_start.pdf)) | Install, first render, every panel, presets, common tasks, troubleshooting and a reference of every setting. The PDF also ships inside the extension: click **?** in the sidebar. |
 | [**Technical Breakdown**](docs/technical_breakdown.md) ([PDF](docs/technical_breakdown.pdf)) | How it works, section by section, with the maths: light bending, the lookup table, the disk, redshift, volumes, the OSL tracer and the Blender integration. |
@@ -37,10 +37,13 @@ Adding a black hole also aims the camera at it, sets up a matching lensed World 
 - **Artistic control.** A physical ↔ gradient colour blend, glow, turbulence, dust lanes and a disk texture with Keplerian motion. The Realism panel lists every setting that departs from real physics, and **Make Physically Accurate** resets them all.
 - **Six presets:** Physical Default, Gargantua (Interstellar), Event Horizon Telescope, Quasar, Neon Stylized and Pure Lensing.
 
-| | |
-|---|---|
-| ![Gargantua preset](docs/images/preset_gargantua.jpg) | ![Quasar preset](docs/images/preset_quasar.jpg) |
-| ![Neon Stylized preset](docs/images/preset_neon.jpg) | ![Lens Scene Objects bending a planet](docs/images/lens_objects_planet.jpg) |
+<p align="center">
+  <img src="docs/images/preset_gargantua.jpg" alt="Gargantua preset" width="49%">
+  <img src="docs/images/preset_quasar.jpg" alt="Quasar preset" width="49%">
+  <img src="docs/images/preset_neon.jpg" alt="Neon Stylized preset" width="49%">
+  <img src="docs/images/lens_objects_planet.jpg" alt="Lens Scene Objects bending a planet" width="49%">
+</p>
+<p align="center"><sub>Gargantua · Quasar · Neon Stylized · Lens Scene Objects</sub></p>
 
 ## Known limitations
 
