@@ -926,3 +926,6 @@ def build_fast(mat, lut_image, disk_group, step_group=None, point_group=None,
     q = g.cross(g.normalize(g.cross(n, t)), d)
     psi = g.atan2(g.dot(exit_obj, q), g.dot(exit_obj, d)) * taper
     exit_obj = g.add(g.mul(d, g.cos(psi)), g.mul(q, g.sin(psi)))
+
+    exit_world = g.normalize(g.transform(exit_obj, "OBJECT", "WORLD", "VECTOR"))
+    _output(g, tree, acc, glow, trans, esc, exit_world, passthrough, boost)
