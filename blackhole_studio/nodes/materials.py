@@ -848,3 +848,81 @@ def build_fast(mat, lut_image, disk_group, step_group=None, point_group=None,
 
     def orbit_point(r, theta):
         return g.mul(g.add(g.mul(a_vec, g.cos(theta)), g.mul(b_vec, g.sin(theta))), r)
+
+    # Disk crossings: the orbital plane meets z = 0 every pi, after the start
+    g.next_column()
+    _, _, az = g.xyz(a_vec)
+    _, _, bz = g.xyz(b_vec)
+    theta0 = g.atan2(-az, bz)
+    first = g.fmod(sigma * (theta0 - th_s), math.pi)
+
+    hits, thetas = [], []
+    for kidx in range(3):
+        theta = th_s + sigma * (first + kidx * math.pi)
+        u, _, _ = lut_at(theta)
+        valid = g.gt(u, 0.0) * g.lt(u, 1.0) * g.max(1.0 - neg, g.gt(theta, 0.0))
+        r = 1.0 / g.max(u, 1e-4)
+        hits.append((orbit_point(r, theta), valid))
+        thetas.append(theta)
+
+    # Relativistic jets: optically thin, straight-line approximation in Fast mode
+    g.next_column()
+    s2j = g.max(dx * dx + dy * dy, 1e-4)
+    t_star = -(px * dx + py * dy) / s2j
+    cx, cy = px + t_star * dx, py + t_star * dy
+    rho2 = cx * cx + cy * cy
+    z_star = pz + t_star * dz
+    az_j = g.abs(z_star)
+
+    jet_len = p("JetLength", 20.0)
+    w = p("JetBase", 0.4) + az_j * g.math("TANGENT", p("JetAngle", 0.08))
+    prof = g.exp(-rho2 / (w * w)) * (g.max(1.0 - az_j / jet_len, 0.0) ** 2.0) * g.smoothstep(0.0, 1.5, az_j)
+    # A camera inside the sphere only sees the jet in front of it
+    prof = prof * g.clamp01(t_star / w + 0.5)
+
+    jn = g.noise(g.vec(cx * 2.0, cy * 2.0, az_j * 0.5 - p("Time", 0.0) * p("NoiseSpeed", 1.0) * 4.0), detail=4.0)
+    jn = g.max(1.0 + p("JetNoise", 0.5) * (jn - 0.5) * 2.0, 0.0)
+
+    path = w * 1.7725 / g.sqrt(s2j)
+    jet = g.mul(g.mul(_color(g, "JetColor"), boost),
+                prof * jn * g.min(path, 50.0) * p("JetIntensity", 1.0) * 0.2 * p("JetEnable", 0.0))
+
+    # The jet on the far side of the disk plane is seen through the disk
+    behind = g.lt(z_star * pz, 0.0)
+    jets = [g.mul(jet, 1.0 - behind), None, None, g.mul(jet, behind)]
+
+    g.next_column()
+    if volume_samples:
+        # The path inside the influence sphere, sampled evenly in orbital angle
+        span = th_final - th_s
+        span = g.lerp(g.max(span, 1e-4), g.min(span, -1e-4), neg)
+
+        # Interior samples are jittered per pixel: banding becomes noise that
+        # anti-aliasing averages away
+        jitter = _pixel_jitter(g) - 0.5
+        layers = [] if thick else _thin_layers(g, disk_group, hits, lz, gamma)
+        d_neg = g.mul(a_vec, -1.0)
+
+        def point_at(j, dep):
+            node = _call(g, point_group, J=float(j), Dep=dep, D=d_neg, E=b_vec, ThetaIn=th_s,
+                         Span=span, ThetaEnd=theta_end, LutX=lut_x,
+                         Jitter=0.0 if j in (0, volume_samples) else jitter,
+                         Samples=float(volume_samples))
+            return Sock(g, node.outputs["P"], True)
+
+        hit_t = [(tk - th_s) / span * float(volume_samples) for tk in thetas]
+        acc, glow, trans = _composite_volume(g, step_group, point_at, volume_samples, layers,
+                                             hit_t, b, jets, thick, lz, gamma, boost)
+    else:
+        acc, glow, trans = _composite_thin(g, disk_group, hits, lz, b, gamma, jets)
+
+    # Bent direction at infinity, then the edge fade (lut.edge_taper): the bending
+    # of rays through the outer part of the sphere is scaled down to 0 at its edge
+    g.next_column()
+    exit_obj = g.add(g.mul(a_vec, g.cos(th_inf)), g.mul(b_vec, g.sin(th_inf)))
+    r_fade = g.min(g.max((1.0 - p("EdgeFade", 0.5)) * bound, lut.FADE_MIN_RADIUS), 0.95 * bound)
+    taper = 1.0 - g.smoothstep(r_fade, bound, b)
+
+    q = g.cross(g.normalize(g.cross(n, t)), d)
+    psi = g.atan2(g.dot(exit_obj, q), g.dot(exit_obj, d)) * taper
+    exit_obj = g.add(g.mul(d, g.cos(psi)), g.mul(q, g.sin(psi)))
