@@ -464,3 +464,191 @@ def _composite_thin(g, disk_group, hits, lz, b, shift, jets=None):
         if jets and jets[k + 1] is not None:
             acc = g.add(acc, g.mul(jets[k + 1], trans))
     return acc, _glow(g, b, trans), trans
+
+def _offset_xyz(g, vec, dep):
+    x, y, z = g.xyz(vec)
+    return (x, y, z) if isinstance(dep, float) else (x + dep, y, z)
+
+def _pixel_jitter(g):
+    """Uniform [0, 1) value that differs between neighbouring shading points."""
+    geo = g.node("ShaderNodeNewGeometry")
+    node = g.node("ShaderNodeTexWhiteNoise", noise_dimensions="3D")
+    g._set(node.inputs["Vector"], g.mul(Sock(g, geo.outputs["Position"], True), 4096.0))
+    return Sock(g, node.outputs["Value"])
+
+def _normal_cdf(g, x):
+    return 0.5 + 0.5 * g.math("TANH", 0.7978845608 * (x + 0.044715 * x * x * x))
+
+STEP_GROUP_PREFIX = "BHS Step "
+POINT_GROUP_PREFIX = "BHS Point "
+
+def build_step_group(name, disk_group, fog_group, thick):
+    """One segment of the volume march, as a reusable group.
+
+    The material chains one instance per path segment, so the per-segment
+    logic is built once (fast to build in Python) and Cycles sees a strictly
+    sequential chain (every value depends on the incoming state, which keeps
+    its SVM stack small whatever order the nodes are compiled in).
+
+    State in/out: Acc (coloured light), FogAcc (scalar fog glow), VolTrans
+    (volume transmittance), FogBefore (optical depth in front of each of the
+    three thin-disk crossings, as a vector).  See _composite_volume."""
+
+    group, g, i, gout = _new_group(
+        STEP_GROUP_PREFIX + name,
+        [("P0", "NodeSocketVector"), ("P1", "NodeSocketVector"), ("Acc", "NodeSocketColor"),
+         ("FogAcc", "NodeSocketFloat"), ("VolTrans", "NodeSocketFloat"),
+         ("FogBefore", "NodeSocketVector"), ("J", "NodeSocketFloat"), ("Lz", "NodeSocketFloat"),
+         ("Time", "NodeSocketFloat"), ("LayerAlpha", "NodeSocketVector"),
+         ("LayerT", "NodeSocketVector"), ("Shift", "NodeSocketFloat")],
+        [("Acc", "NodeSocketColor"), ("FogAcc", "NodeSocketFloat"), ("VolTrans", "NodeSocketFloat"),
+         ("FogBefore", "NodeSocketVector"), ("Dep", "NodeSocketFloat")])
+
+    p = g.param
+    r_in = p("DiskInner", 3.0)
+    vol_trans = i["VolTrans"]
+    dep = vol_trans * 1e-30           # Ties every term below to the incoming state
+    pos_j = i["J"] + dep
+
+    x0, y0, z0 = g.xyz(i["P0"])
+    x1, y1, z1 = g.xyz(i["P1"])
+    ddx, ddy, dz = x1 - x0, y1 - y0, z1 - z0
+    ds = g.sqrt(ddx * ddx + ddy * ddy + dz * dz)
+    fog = _call(g, fog_group, Pos=g.vec((x0 + x1) * 0.5, (y0 + y1) * 0.5, (z0 + z1) * 0.5),
+                Ds=ds, Time=i["Time"])
+    glow = Sock(g, fog.outputs["Glow"])
+    tau = Sock(g, fog.outputs["Tau"])
+    acc = i["Acc"]
+    weight = vol_trans
+
+    if thick:
+        # Gaussian slab, integrated in closed form over the segment; the disk is
+        # shaded where the segment crosses the midplane, else at its midpoint
+        den = z0 - z1
+        t_cross = g.clamp01(z0 / (g.math("SIGN", den) * g.max(g.abs(den), 1e-6)))
+        t_star = g.lerp(0.5, t_cross, g.lt(z0 * z1, 0.0))
+        qx, qy = x0 + ddx * t_star, y0 + ddy * t_star
+
+        rc = g.max(g.sqrt(qx * qx + qy * qy), 1e-3)
+        h = g.max(p("DiskThickness", 0.0) * rc * ((rc / r_in) ** p("DiskFlare", 0.0)), 1e-4)
+        steep = g.gt(g.abs(dz), h * 1e-3)
+        column_steep = ds * g.abs(_normal_cdf(g, z1 / h) - _normal_cdf(g, z0 / h)) / g.max(g.abs(dz), 1e-6)
+        zm = (z0 + z1) * 0.5
+        column_flat = ds * g.exp(-0.5 * (zm / h) * (zm / h)) / (2.5066283 * h)
+        column = g.lerp(column_flat, column_steep, steep)
+
+        disk = _call(g, disk_group, Hit=g.vec(qx, qy, 0.0), Lz=i["Lz"], Time=i["Time"], Boost=1.0,
+                     Shift=i["Shift"])
+        alpha = g.min(Sock(g, disk.outputs["Alpha"]), 0.999)
+        tau_d = -g.log(1.0 - alpha) * column
+        em = g.mul(Sock(g, disk.outputs["Emission"], True), (1.0 - g.exp(-tau_d)) * weight)
+        acc = g.add(acc, em)
+        tau = tau + tau_d
+        fog_before = i["FogBefore"]
+
+    else:
+        # thin-disk crossings in front of this segment dim it
+        ax, ay, az = g.xyz(i["LayerAlpha"])
+        tx, ty, tz = g.xyz(i["LayerT"])
+        mid_t = pos_j + 0.5
+        for a, tk in ((ax, tx), (ay, ty), (az, tz)):
+            weight = weight * (1.0 - a * g.lt(tk, mid_t))
+
+        fbx, fby, fbz = g.xyz(i["FogBefore"])
+        fog_before = g.vec(fbx + tau * g.clamp01(tx - pos_j), fby + tau * g.clamp01(ty - pos_j),
+                           fbz + tau * g.clamp01(tz - pos_j))
+
+    fog_acc = i["FogAcc"] + glow * weight
+    vol_out = vol_trans * g.exp(-tau)
+
+    # "Seal": every output depends (x 1e-30) on all of them. Blender 5's Cycles
+    # schedules nodes Sethi-Ullman style, finishing one dependency chain before the
+    # next; with separate accumulator chains it would run one through all segments
+    # while holding the others' inputs on the stack. Sealed, a step is computed
+    # as a unit and the chains advance together.
+    seal = (vol_out + fog_acc + g.dot(fog_before, (1.0, 1.0, 1.0)) + g.luminance(acc)) * 1e-30
+    sealed_vec = g.vec(seal, seal, seal)
+    return _finish_group(group, g, gout, {
+        "Acc": g.add(acc, sealed_vec), "FogAcc": fog_acc + seal, "VolTrans": vol_out + seal,
+        "FogBefore": g.add(fog_before, sealed_vec), "Dep": seal})
+
+def build_point_group(name, lut_image):
+    """Fast mode: the path point at segment boundary J, from the geodesic table."""
+    group, g, i, gout = _new_group(
+        POINT_GROUP_PREFIX + name,
+        [("J", "NodeSocketFloat"), ("Dep", "NodeSocketFloat"), ("D", "NodeSocketVector"),
+         ("E", "NodeSocketVector"), ("ThetaIn", "NodeSocketFloat"), ("Span", "NodeSocketFloat"),
+         ("ThetaEnd", "NodeSocketFloat"), ("Jitter", "NodeSocketFloat"),
+         ("LutX", "NodeSocketFloat"), ("Samples", "NodeSocketFloat")],
+        [("P", "NodeSocketVector")])
+
+    # Dep first: every term depends on the chain
+    theta = ((i["Dep"] + i["J"]) + i["Jitter"]) / i["Samples"] * i["Span"] + i["ThetaIn"]
+
+    img = g.node("ShaderNodeTexImage", interpolation="Linear", extension="EXTEND")
+    img.name = img.label = "LUT"
+    img.image = lut_image
+    g._set(img.inputs["Vector"], g.vec(i["LutX"], g.min(theta, i["ThetaEnd"] - 1e-3) / lut.THETA_MAX, 0.0))
+    u, _, _ = g.xyz(Sock(g, img.outputs["Color"], True))
+
+    r_exit = g.param("ExitRadius", 30.0)
+    r = 1.0 / g.clamp(u, 1.0 / r_exit, 1.0)
+    point = g.mul(g.add(g.mul(i["D"], -g.cos(theta)), g.mul(i["E"], g.sin(theta))), r)
+    return _finish_group(group, g, gout, {"P": point})
+
+def _composite_volume(g, step_group, point_at, n_seg, layers, hit_t, b, jets, thick, lz,
+                      shift, boost):
+    """Fog and/or thick disk integrated along the path polyline P_0..P_N.
+
+    point_at(j, dep) returns P_j.  Each segment is one instance of the step
+    group (see build_step_group).  Thin disk: the exact crossings (layers) are
+    composited at their positions hit_t along the polyline.  Thick disk: the
+    step group integrates the Gaussian slab (volume.slab_column).
+    Returns (emitted colour, glow colour, remaining transmittance)."""
+
+    p = g.param
+    time = p("Time", 0.0)
+    if layers:
+        alphas = g.vec(*[a for _, a in layers])
+        ts = g.vec(*hit_t)
+    else:
+        alphas = ts = (0.0, 0.0, 0.0)
+    acc = jets[0] if jets else (0.0, 0.0, 0.0, 1.0)
+    fog_acc, vol_trans, fog_before, dep = 0.0, 1.0, (0.0, 0.0, 0.0), 0.0
+
+    p0 = point_at(0, 0.0)
+    for j in range(n_seg):
+        g.next_column()
+        p1 = point_at(j + 1, dep)
+        step = _call(g, step_group, P0=p0, P1=p1, Acc=acc, FogAcc=fog_acc, VolTrans=vol_trans,
+                     FogBefore=fog_before, J=float(j), Lz=lz, Time=time, LayerAlpha=alphas,
+                     LayerT=ts, Shift=shift)
+        acc = Sock(g, step.outputs["Acc"], True)
+        fog_acc = Sock(g, step.outputs["FogAcc"])
+        vol_trans = Sock(g, step.outputs["VolTrans"])
+        fog_before = Sock(g, step.outputs["FogBefore"], True)
+        dep = Sock(g, step.outputs["Dep"])
+        p0 = p1
+
+    acc = g.add(acc, g.mul(g.mul(_fog_color(g), boost), fog_acc))
+
+    if layers:
+        fbs = g.xyz(fog_before)
+
+        def thin_before(t):
+            out = 1.0
+            for (_, a), tk in zip(layers, hit_t):
+                out = out * (1.0 - a * g.lt(tk, t))
+            return out
+
+        for k, ((em, a), tk) in enumerate(zip(layers, hit_t)):
+            acc = g.add(acc, g.mul(em, a * thin_before(tk) * g.exp(-fbs[k])))
+
+    trans = vol_trans
+    for _, a in layers:
+        trans = trans * (1.0 - a)
+    if jets:
+        for k in (1, 2, 3):
+            if jets[k] is not None:
+                acc = g.add(acc, g.mul(jets[k], trans))
+    return acc, _glow(g, b, trans), trans
