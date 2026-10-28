@@ -732,3 +732,119 @@ def build_exact(mat, disk_group, step_group=None, volume_samples=0, thick=False)
                                            gamma, jets)
     _output(g, tree, acc, glow, trans, out("Escaped"), out("ExitDir", True), out("Pass"), boost)
     return script
+
+# --------------------------------------------------------------------------
+# Fast mode (geodesic lookup table + math nodes)
+# --------------------------------------------------------------------------
+
+def build_fast(mat, lut_image, disk_group, step_group=None, point_group=None,
+               volume_samples=0, thick=False):
+    """Fast mode; tests/fast_reference.py is a NumPy mirror of this graph."""
+    _enable_nodes(mat)
+    tree = mat.node_tree
+    tree.nodes.clear()
+    g = Graph(tree)
+    p = g.param
+    scale = p("Scale", 1.0 / 30.0)
+    bound = p("Bound", 30.0)
+    k = p("Strength", 1.0)
+
+    # The light path is traced from the ray's origin (the camera), inside or
+    # outside the sphere, so its bending is exact GR from the camera to
+    # infinity; the inside of the sphere seen from outside (a ray refracted
+    # through it) is see-through
+    geo = g.node("ShaderNodeNewGeometry")
+    o_obj = g.div(g.transform(_ray_origin(g), "WORLD", "OBJECT", "POINT"), scale)
+    d = g.normalize(g.transform(-Sock(g, geo.outputs["Incoming"], True), "WORLD", "OBJECT", "VECTOR"))
+
+    inside = g.lt(g.length(o_obj), bound * 0.999)
+    passthrough = Sock(g, geo.outputs["Backfacing"]) * (1.0 - inside)
+    pos = o_obj
+    dx, dy, dz = g.xyz(d)
+    spin = p("Spin", 0.0)
+    sign = p("RotationSign", 1.0)
+
+    # Bardeen shadow displacement (approx.), same as the OSL shader
+    pos = g.add(pos, g.mul(g.vec(-dy, dx, 0.0), p("ShadowShift", 1.0) * spin * sign))
+    px, py, pz = g.xyz(pos)
+    g.next_column()
+
+    # Start radius, radial direction n, direction of angular motion t
+    r_c = g.max(g.length(pos), 1.0001)
+    u_c = 1.0 / r_c
+    n = g.div(pos, r_c)
+    ndotd = g.dot(n, d)
+    # fFr rays aimed exactly at the centre any perpendicular will do
+    t = g.normalize(g.add(g.sub(d, g.mul(n, ndotd)), g.mul(g.cross(d, (0.577, 0.577, 0.577)), 1e-5)))
+    sin_a = g.length(g.cross(n, d))
+
+    # Impact parameter: the ray leaves along the camera direction in Schwarzschild
+    # coordinates; a hovering observer measures the angle in its own frame
+    hover = p("Hovering", 0.0)
+    s2 = g.lerp(sin_a * sin_a, 1.0, hover)
+    b_ratio = 1.0 / g.sqrt(g.max(1.0 - k * u_c * s2, 1e-6))
+    b = r_c * sin_a * b_ratio
+
+    gamma = g.lerp(1.0, g.sqrt(g.max(1.0 - k / bound, 1e-6) /
+                               g.max(1.0 - k / g.min(r_c, bound), 1e-6)), hover)
+    boost = _observer_boost(g, gamma)
+
+    s = physics.CRITICAL_IMPACT
+    b_max = p("LutBMax", 31.5)
+    lut_x = (b / (b + s)) * ((b_max + s) / b_max)
+    lz = -(px * dy - py * dx) * sign * b_ratio
+    g.next_column()
+
+    def lut_at(theta):
+        return g.xyz(g.image(lut_image, g.vec(lut_x, theta / lut.THETA_MAX, 0.0)))
+
+    def inverse_at(y):
+        """Inverse orbit table (alpha channel) at row y (lut.inverse_v)."""
+        img = g.node("ShaderNodeTexImage", interpolation="Linear", extension="EXTEND")
+        img.image = lut_image
+        g._set(img.inputs["Vector"], g.vec(lut_x, (y * (lut.HEIGHT - 1) + 0.5) / lut.HEIGHT, 0.0))
+        return Sock(g, img.outputs["Alpha"])
+
+    # Escape / capture of the orbit with this b, and its turning point
+    _, g_end, _ = lut_at(0.5 * lut.THETA_MAX)
+    captured = g.lt(g_end, 0.0)
+    theta_end = g.abs(g_end) * lut.THETA_MAX
+
+    kk = g.max(k, 1e-6)
+    x = g.clamp(1.0 - 13.5 * kk * kk / (b * b), -1.0, 1.0)
+    u_peri = (1.0 + 2.0 * g.cos(g.math("ARCCOSINE", x) / 3.0 - 2.0 * math.pi / 3.0)) / (3.0 * kk)
+    u_peri = g.lerp(u_peri, 1.0 / b, g.lt(k, 0.01))
+    u_max = g.lerp(g.min(u_peri, 1.0), 1.0, captured)
+
+    def inverse(u):
+        q = g.min(u / u_max, 1.0)
+        return inverse_at(1.0 - g.sqrt(1.0 - q))
+
+    g.next_column()
+    th_raw = inverse(u_c)
+    th_r = inverse(1.0 / bound)
+    inward = g.lt(ndotd, 0.0)
+
+    # Outgoing ray on an orbit that falls in from infinity: walk the table backwards
+    neg = (1.0 - inward) * captured
+    sigma = 1.0 - 2.0 * neg
+    # Outgoing ray on an escaping orbit: the mirror half of the same orbit
+    th_c = g.lerp(th_raw, theta_end - th_raw, (1.0 - inward) * (1.0 - captured))
+
+    trapped = (1.0 - captured) * g.gt(u_c, u_max * 1.001)      # Bound orbit inside the photon sphere
+    esc = (1.0 - captured * inward) * (1.0 - trapped)
+    th_final = g.lerp(g.lerp(theta_end - th_r, theta_end, captured), th_r, neg)
+    th_inf = theta_end * (1.0 - neg)
+
+    # Disk and fog are sampled from where the ray is inside the sphere
+    th_s = g.lerp(th_r, th_c, inside)
+
+    # Orbital-plane basis: P(theta) = r(theta) (A cos theta + B sin theta) passes the
+    # start point at theta_c, moving along sigma * t
+    cc, sc = g.cos(th_c), g.sin(th_c)
+    st = g.mul(t, sigma)
+    a_vec = g.sub(g.mul(n, cc), g.mul(st, sc))
+    b_vec = g.add(g.mul(n, sc), g.mul(st, cc))
+
+    def orbit_point(r, theta):
+        return g.mul(g.add(g.mul(a_vec, g.cos(theta)), g.mul(b_vec, g.sin(theta))), r)
