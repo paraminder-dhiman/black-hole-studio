@@ -63,7 +63,7 @@ def apply(settings, key):
     """Reset to defaults, then apply the preset's overrides."""
     from . import builder
     root = settings.id_data
-    # suspend per-property updates by writing through a temporary flag
+    # Suspend per-property updates by writing through a temporary flag
     root["_bhs_suspend"] = True
     try:
         for prop in settings.bl_rna.properties:
