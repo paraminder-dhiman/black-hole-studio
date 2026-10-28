@@ -435,8 +435,10 @@ def _glow(g, b, trans):
     glow = g.mul(_color(g, "RingGlowColor"), p("RingGlow", 0.0) * g.exp(-xg * xg))
 
     inside = g.lt(b, b_sh)
+    # The exponent is clamped at 0 outside the shadow: exp would overflow to inf
+    # there (b ~ 30 r_s), and 0 * inf = NaN blanks the whole pixel in Eevee
     hglow = g.mul(_color(g, "HorizonGlowColor"),
-                  p("HorizonGlow", 0.0) * inside * g.exp(-(b_sh - b) / (width * 2.0)))
+                  p("HorizonGlow", 0.0) * inside * g.exp(-g.max(b_sh - b, 0.0) / (width * 2.0)))
     return g.mul(g.add(glow, hglow), trans)
 
 def _thin_layers(g, disk_group, hits, lz, shift):

@@ -88,7 +88,7 @@ def _lut_name(root):
     return "BHS LUT " + root.name
 
 TEXTURE_PATH = os.path.join(os.path.dirname(__file__), "textures", "accretion_disk.png")
-SKY_PATH = os.path.join(os.path.dirname(__file__), "textures", "nebula_sky.exr")
+SKY_PATH = os.path.join(os.path.dirname(__file__), "textures", "milky_way_sky.exr")
 
 LUT_VERSION = 1      # Table layout (lut.py)
 VERSION = 1          # Bumped when the shader layout changes; older files are rebuilt
@@ -116,7 +116,7 @@ def default_texture():
     return _bundled_image(TEXTURE_PATH, "Non-Color")
 
 def default_sky():
-    """The bundled nebula skybox (linear HDR, equirectangular)."""
+    """The bundled Milky Way skybox (NASA SVS Deep Star Maps 2020; linear HDR, equirectangular)."""
     return _bundled_image(SKY_PATH)
 
 def _annulus_mesh(mesh, r_in, r_out, segments=128, rings=12):
@@ -267,7 +267,7 @@ def apply(root):
     if lens is None or mat is None or not mat.node_tree:
         return
     if root.get("_bhs_struct") != repr(params.structure(s)) or \
-            root.get("_bhs_version", 0) < VERSION:
+            root.get("_bhs_version", 0) != VERSION:
         rebuild(root)          # Fog/thickness/quality switched: the graph changes
         return
 

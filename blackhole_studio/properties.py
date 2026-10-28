@@ -237,7 +237,7 @@ class BlackHoleSettings(bpy.types.PropertyGroup):
                              "as the background the black hole lenses. Off: procedural starfield")
     sky_image: PointerProperty(name="Skybox", type=bpy.types.Image, update=_update,
                                description="Equirectangular (2:1) sky image. Defaults to the "
-                               "bundled nebula; use the folder icon to load your own")
+                               "bundled Milky Way (NASA); use the folder icon to load your own")
     sky_strength: _f("Skybox Brightness", 2.5, 0.0, 1000.0, "Multiplier on the skybox image",
                      soft=(0.0, 30.0))
     sky_rotation: FloatProperty(name="Skybox Rotation", default=0.0, subtype="ANGLE",
