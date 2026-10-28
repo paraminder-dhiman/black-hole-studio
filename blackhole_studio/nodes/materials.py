@@ -653,6 +653,9 @@ def _composite_volume(g, step_group, point_at, n_seg, layers, hit_t, b, jets, th
                 acc = g.add(acc, g.mul(jets[k], trans))
     return acc, _glow(g, b, trans), trans
 
+# --------------------------------------------------------------------------
+# Exact mode (OSL)
+# --------------------------------------------------------------------------
 def ensure_osl_text(path_samples=0):
     """The OSL source with PATH_SAMPLES path outputs; one text per sample count."""
     with open(SHADER_PATH, "r", encoding="utf-8") as f:
@@ -694,7 +697,7 @@ def build_exact(mat, disk_group, step_group=None, volume_samples=0, thick=False)
     try:  # Compile now so the sockets exist (needs Cycles + OSL)
         import cycles.osl
         cycles.osl.update_script_node(script, lambda *a: None)
-    except Exception:  # Pragma: no cover - Cycles unavailable
+    except Exception:  # pragma: no cover - Cycles unavailable
         pass
     script.location = (g.x0 - 200, 300)
     if "Hit1" not in script.outputs:
@@ -774,7 +777,7 @@ def build_fast(mat, lut_image, disk_group, step_group=None, point_group=None,
     u_c = 1.0 / r_c
     n = g.div(pos, r_c)
     ndotd = g.dot(n, d)
-    # fFr rays aimed exactly at the centre any perpendicular will do
+    # For rays aimed exactly at the centre any perpendicular will do
     t = g.normalize(g.add(g.sub(d, g.mul(n, ndotd)), g.mul(g.cross(d, (0.577, 0.577, 0.577)), 1e-5)))
     sin_a = g.length(g.cross(n, d))
 
@@ -929,3 +932,57 @@ def build_fast(mat, lut_image, disk_group, step_group=None, point_group=None,
 
     exit_world = g.normalize(g.transform(exit_obj, "OBJECT", "WORLD", "VECTOR"))
     _output(g, tree, acc, glow, trans, esc, exit_world, passthrough, boost)
+
+def build_illumination(mat):
+    """Emitter for the invisible disk-light mesh: thin-disk temperature profile
+    and the same physical/artistic colour blend as the visible disk."""
+    _enable_nodes(mat)
+    tree = mat.node_tree
+    tree.nodes.clear()
+    g = Graph(tree)
+    p = g.param
+
+    coord = g.node("ShaderNodeTexCoord")
+    hx, hy, _ = g.xyz(Sock(g, coord.outputs["Object"], True))
+    r = g.max(g.sqrt(hx * hx + hy * hy), 1e-3)          # The mesh is modelled in r_s units
+
+    r_in = p("DiskInner", 3.0)
+    q = p("TempExponent", 0.75)
+    s_pk = 8.0 * q / (8.0 * q + 1.0)
+    tn = _temp_shape(g, r / r_in, q) / _temp_shape(g, 1.0 / (s_pk * s_pk), q)
+
+    bb = g.blackbody(p("PeakTemp", 7000.0) * tn)
+    phys = g.div(bb, g.max(g.luminance(bb), 1e-4))
+    col = g.lerp(_color(g, "ColorMid"), phys, p("PhysicalMix", 1.0))
+
+    strength = (g.max(tn, 0.0) ** 4.0) * p("EmissionStrength", 1.0) * \
+        p("IlluminationStrength", 1.0) * p("DiskEnable", 1.0)
+    em = g.node("ShaderNodeEmission")
+    g._set(em.inputs["Color"], col)
+    g._set(em.inputs["Strength"], strength)
+
+    out = tree.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (g.x0 + (g._col + 2) * 180, 0)
+    tree.links.new(em.outputs[0], out.inputs["Surface"])
+
+def make_lut_image(name, bound, strength):
+    img = bpy.data.images.get(name)
+    w, h = lut.WIDTH, lut.HEIGHT
+    if img is None or img.size[0] != w or img.size[1] != h:
+        if img is not None:
+            bpy.data.images.remove(img)
+        img = bpy.data.images.new(name, w, h, alpha=True, float_buffer=True, is_data=True)
+
+    # Non-Color is set by images.new(is_data=True).  Image settings must be made
+    # before the pixels are written: changing colorspace or alpha mode afterwards
+    # reloads a generated image and its pixels are lost.
+    # The alpha channel is a table of its own, not opacity.
+    if img.alpha_mode != "CHANNEL_PACKED":
+        img.alpha_mode = "CHANNEL_PACKED"
+
+    data = lut.compute(bound, strength)
+    img.pixels.foreach_set(data.ravel())
+    img.file_format = "OPEN_EXR"
+    img.pack()
+    img.use_fake_user = False
+    return img

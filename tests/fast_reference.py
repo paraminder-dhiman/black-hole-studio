@@ -49,8 +49,7 @@ def impact_parameter(r_c, sin_a, strength=1.0, hovering=False):
     Default camera: the ray starts along the camera direction in Schwarzschild
     coordinates (du/dphi = -u cot a), so b = r sin a / sqrt(1 - k u sin^2 a).
     Hovering observer: a is measured in the observer's own frame,
-    b = r sin a / sqrt(1 - k u)  (the shadow looks smaller).                # changed
-    """
+    b = r sin a / sqrt(1 - k u)  (the shadow looks smaller)."""
     u = 1.0 / r_c
     s2 = 1.0 if hovering else sin_a * sin_a
     return r_c * sin_a / math.sqrt(max(1.0 - strength * u * s2, 1e-6))
