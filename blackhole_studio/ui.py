@@ -27,7 +27,9 @@ class BHS_PT_main(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         root = _root(context)
-        layout.operator("blackhole.add", icon="ADD")
+        row = layout.row(align=True)
+        row.operator("blackhole.add", icon="ADD")
+        row.operator("blackhole.help", text="", icon="QUESTION")
         if root is None:
             layout.label(text="Select a black hole to edit it", icon="INFO")
             return

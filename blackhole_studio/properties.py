@@ -18,6 +18,13 @@ def _rebuild(self, context):
     from . import builder
     builder.rebuild(self.id_data)
 
+def _mode_changed(self, context):
+    if self.id_data.get("_bhs_suspend"):
+        return
+    from . import builder, operators
+    operators.sync_render_mode(context.scene)
+    builder.rebuild(self.id_data)
+
 def _f(name, default, lo, hi, desc, soft=None, update=_update, **kw):
     smin, smax = soft if soft else (lo, hi)
     return FloatProperty(name=name, default=default, min=lo, max=hi, soft_min=smin,
@@ -40,7 +47,7 @@ class BlackHoleSettings(bpy.types.PropertyGroup):
              "Integrates every light ray with RK4 in an OSL shader. CPU only. Adds frame "
              "dragging and volumetric jets along curved paths"),
         ],
-        default="FAST", update=_rebuild)
+        default="FAST", update=_mode_changed)
 
     # Physics
     mass_solar: _f("Mass (M☉)", 4.3e6, 1.0, 1e11, "Mass in solar masses. Only sets the real-world "

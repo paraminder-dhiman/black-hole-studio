@@ -1,5 +1,6 @@
 """Operators: add/remove black holes, presets, render, world and compositor setup."""
 
+import os
 import bpy
 from bpy.props import BoolProperty, EnumProperty
 
@@ -64,6 +65,7 @@ class BHS_OT_remove(_NeedsBlackHole, bpy.types.Operator):
 
     def execute(self, context):
         builder.remove(_active_root(context))
+        sync_render_mode(context.scene)
         return {"FINISHED"}
 
 class BHS_OT_preset(_NeedsBlackHole, bpy.types.Operator):
@@ -143,6 +145,32 @@ def configure_render(scene, root, quality):
         scene.view_settings.look = "AgX - Punchy" if not final else "None"
     except TypeError:
         scene.view_settings.view_transform = "Filmic"
+
+def _exact_in_scene(scene):
+    """True if any black hole in the scene renders in Exact mode."""
+    return any(ob.blackhole.is_blackhole and ob.blackhole.mode == "EXACT" for ob in scene.objects)
+
+def sync_render_mode(scene):
+    """Keep the scene's render settings in step with its black holes' render modes."""
+    if scene is None:
+        return
+    cy = scene.cycles
+    if _exact_in_scene(scene):
+        if "_bhs_prev_render" not in scene:
+            scene["_bhs_prev_render"] = {"engine": scene.render.engine, "device": cy.device,
+                                         "osl": cy.shading_system}
+        scene.render.engine = "CYCLES"
+        cy.device = "CPU"
+        cy.shading_system = True
+    else:
+        prev = scene.get("_bhs_prev_render")
+        if prev is None:
+            cy.shading_system = False
+            return
+        scene.render.engine = prev["engine"]
+        cy.device = prev["device"]
+        cy.shading_system = bool(prev["osl"])
+        del scene["_bhs_prev_render"]
 
 class BHS_OT_configure_render(_NeedsBlackHole, bpy.types.Operator):
     """Set Cycles, OSL/device, bounces and color management for this black hole's mode"""
@@ -247,10 +275,24 @@ class BHS_OT_setup_compositor(bpy.types.Operator):
         links.new(glare.outputs["Image"], lens.inputs["Image"])
         links.new(lens.outputs["Image"], comp.inputs["Image"])
 
+QUICK_START = os.path.join(os.path.dirname(__file__), "docs", "quick_start.pdf")
+
+class BHS_OT_help(bpy.types.Operator):
+    """Open the Black Hole Studio Quick Start guide (PDF)"""
+    bl_idname = "blackhole.help"
+    bl_label = "Quick Start Guide"
+
+    def execute(self, context):
+        if not os.path.isfile(QUICK_START):
+            self.report({"ERROR"}, "Quick Start guide not found in the extension folder")
+            return {"CANCELLED"}
+        bpy.ops.wm.path_open(filepath=QUICK_START)
+        return {"FINISHED"}
+
 classes = (BHS_OT_add, BHS_OT_rebuild, BHS_OT_remove, BHS_OT_preset, BHS_OT_make_physical,
            BHS_OT_frame_camera,
-           BHS_OT_setup_world, BHS_OT_configure_render, BHS_OT_setup_compositor)
-
+           BHS_OT_setup_world, BHS_OT_configure_render, BHS_OT_setup_compositor,
+           BHS_OT_help)
 
 def menu_func(self, context):
     self.layout.operator(BHS_OT_add.bl_idname, text="Black Hole", icon="SHADING_SOLID")
@@ -259,7 +301,6 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.VIEW3D_MT_add.append(menu_func)
-
 
 def unregister():
     bpy.types.VIEW3D_MT_add.remove(menu_func)
