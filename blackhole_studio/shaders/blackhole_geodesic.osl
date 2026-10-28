@@ -9,7 +9,7 @@
 // crosses the disk (up to three times: primary, secondary and photon-ring
 // images), the jet light gathered between those crossings, and the asymptotic
 // direction used to look up the background.  The disk itself (temperature,
-// redshift, colour, texture, turbulence) is shaded by shader nodes that      // changed
+// redshift, colour, texture, turbulence) is shaded by shader nodes that
 // are shared with Fast mode, so images and curves work in both modes.
 //
 // Spin is approximate: light paths are Schwarzschild plus a Lense-Thirring
@@ -176,7 +176,7 @@ shader blackhole_geodesic(
     int left = 0;
     float i_in = 0.0;
 
-    #if PATH_SAMPLES > 0
+#if PATH_SAMPLES > 0
     point rec[PATH_REC];
     rec[0] = o;
     int n_rec = inside;
@@ -188,3 +188,153 @@ shader blackhole_geodesic(
     float psi = 0.0;     // accumulated frame-dragging rotation
     point prev = o;
     vector exit_dir = d;
+
+    for (int i = 0; i < max_steps; i++) {
+        // RK4
+        float k1u = ud,                 k1d = -uu + c * uu * uu;
+        float u2 = uu + 0.5 * h * k1u,   d2 = ud + 0.5 * h * k1d;
+        float k2u = d2,                 k2d = -u2 + c * u2 * u2;
+        float u3 = uu + 0.5 * h * k2u,   d3 = ud + 0.5 * h * k2d;
+        float k3u = d3,                 k3d = -u3 + c * u3 * u3;
+        float u4 = uu + h * k3u,         d4 = ud + h * k3d;
+        float k4u = d4,                 k4d = -u4 + c * u4 * u4;
+        float un = uu + h / 6.0 * (k1u + 2.0 * k2u + 2.0 * k3u + k4u);
+        float dn = ud + h / 6.0 * (k1d + 2.0 * k2d + 2.0 * k3d + k4d);
+        float phin = phi + h;
+
+        float uc = max(un, 1e-6);
+        float rn = 1.0 / uc;
+        if (spin != 0.0 && FrameDrag != 0.0 && b > 1e-4) {
+            // Lense-Thirring: omega = 2Ma r / (r^3 + a^2 r + 2Ma^2), dt/dphi = r^2 / (b (1 - r_s/r))
+            float rm = 2.0 * rn;
+            float w = 4.0 * spin * rm / (rm * rm * rm + spin * spin * rm + 2.0 * spin * spin);
+            float dtdphi = rn * rn / (b * max(1.0 - 1.0 / rn, 0.05));
+            psi -= FrameDrag * RotationSign * w * dtdphi * h;
+        }
+
+        point pos = rot_z(rn * (cos(phin) * e1 + sin(phin) * e2), psi);
+
+        // --- relativistic jets (optically thin, along +-z) ---
+        if (JetEnable > 0.0 && min(fabs(prev[2]), fabs(pos[2])) < JetLength) {
+            // far from the hole one step can be wider than the jet: sub-sample it
+            float ds = length(pos - prev);
+            float w_min = JetBase + min(fabs(prev[2]), fabs(pos[2])) * tan(JetAngle);
+            int nsub = (int)clamp(ceil(ds / (0.3 * w_min)), 1.0, 32.0);
+            int seg = min(crossings, 3);
+
+            for (int j = 0; j < nsub; j++) {
+                point sp = mix(prev, pos, (j + 0.5) / nsub);
+                float az = fabs(sp[2]);
+                if (az >= JetLength) continue;
+                float rho = sqrt(sp[0] * sp[0] + sp[1] * sp[1]);
+                float w = JetBase + az * tan(JetAngle);
+                float prof = exp(-(rho * rho) / (w * w)) * pow(1.0 - az / JetLength, 2.0) * smoothstep(0.0, 1.5, az);
+
+                if (prof > 1e-4) {
+                    float n = 1.0 + JetNoise * fbm(point(sp[0] * 2.0, sp[1] * 2.0, az * 0.5 - Time * NoiseSpeed * 4.0), 4, 0.5);
+                    jets[seg] += JetColor * (JetIntensity * prof * max(n, 0.0) * (ds / nsub) * 0.2);
+                }
+            }
+        }
+
+        // --- disk-plane crossing inside the disk's radial range ---
+        if (DiskEnable > 0.0 && crossings < 3 && prev[2] * pos[2] < 0.0) {
+            float t = prev[2] / (prev[2] - pos[2]);
+            point hit = prev + t * (pos - prev);
+            float rh = sqrt(hit[0] * hit[0] + hit[1] * hit[1]);
+
+            if (rh >= DiskInner && rh <= r_disk_max) {
+                vector hv = vector(hit[0], hit[1], 0.0);
+                hit_step[crossings] = i + t - i_in;
+                if (crossings == 0)      { Hit1 = hv; Valid1 = 1; }
+                else if (crossings == 1) { Hit2 = hv; Valid2 = 1; }
+                else                     { Hit3 = hv; Valid3 = 1; }
+                crossings += 1;
+            }
+        }
+
+        if (!inside && un >= u_exit) {
+            // entering the sphere: the recorded path starts here
+            inside = 1;
+            i_in = i + 1;
+#if PATH_SAMPLES > 0
+            rec[0] = pos;
+            n_rec = 1;
+#endif
+        }
+        int leaving = inside && !left && un <= u_exit && dn < 0.0;
+
+#if PATH_SAMPLES > 0
+        if (inside && !left && n_rec > 0) {
+            float j = i + 1 - i_in;
+            int last = (un >= u_h) || leaving || (i == max_steps - 1);
+            if (j > 0 && (((int)j) % stride == 0 || last) && n_rec < PATH_REC) {
+                rec[n_rec] = pos;
+                n_rec += 1;
+                last_rec_step = j;
+            }
+        }
+#endif
+        if (leaving) left = 1;
+
+        if (un >= u_h) break;
+        if (un <= u_far && dn < 0.0) {
+            if (un <= 0.0) {
+                // stepped past infinity (u = 0): the asymptote is the direction of
+                // the position at the interpolated angle where u crosses 0
+                float phi_inf = phi + h * uu / max(uu - un, 1e-12);
+                exit_dir = normalize(rot_z(cos(phi_inf) * e1 + sin(phi_inf) * e2, psi));
+            
+            } else {
+                float dr = -dn / (uc * uc);
+                vector er = cos(phin) * e1 + sin(phin) * e2;
+                vector ep = -sin(phin) * e1 + cos(phin) * e2;
+                exit_dir = normalize(rot_z(dr * er + rn * ep, psi));
+            }
+            escaped = 1;
+            break;
+        }
+        uu = un; ud = dn; phi = phin; prev = pos;
+    }
+
+    Jet0 = jets[0]; Jet1 = jets[1]; Jet2 = jets[2]; Jet3 = jets[3];
+
+#if PATH_SAMPLES > 0
+    // record index -> step (from entry): index k < n_rec - 1 is step k * stride,
+    // the last is last_rec_step
+    if (n_rec < 2) { rec[1] = rec[0]; n_rec = 2; last_rec_step = 1.0; }
+    float span = (float)(n_rec - 1);
+    float steps_full = (n_rec - 2) * stride;
+    float to_seg = PATH_SAMPLES / max(span, 1.0);
+
+    float hts[3];
+    for (int k = 0; k < 3; k++) {
+        float st = hit_step[k];
+        float idx = (st <= steps_full) ? st / stride
+                  : (n_rec - 2) + (st - steps_full) / max(last_rec_step - steps_full, 1e-6);
+        hts[k] = idx * to_seg;
+    }
+    HitT1 = hts[0]; HitT2 = hts[1]; HitT3 = hts[2];
+
+    // interior path samples are jittered per shading point (as in Fast mode)
+    float jitter = cellnoise(P * 4096.0) - 0.5;
+    /*@PATH_ASSIGN@*/
+#endif
+
+    if (escaped) {
+        // edge fade (lut.edge_taper): the bending of rays through the outer part
+        // of the sphere is scaled down smoothly to zero at its edge
+        float R = Bound;
+        float r_fade = min(max((1.0 - EdgeFade) * R, 6.0), 0.95 * R);
+        float taper = 1.0 - smoothstep(r_fade, R, b);
+
+        float ang = acos(clamp(dot(d_start, exit_dir), -1.0, 1.0));
+        if (ang > 1e-6) {
+            vector q = normalize(exit_dir - d_start * dot(d_start, exit_dir));
+            exit_dir = d_start * cos(ang * taper) + q * sin(ang * taper);
+        }
+    }
+
+    Escaped = (float)escaped;
+    ExitDir = normalize(transform("object", "world", escaped ? exit_dir : d));
+}
