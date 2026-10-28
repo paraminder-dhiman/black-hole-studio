@@ -1,0 +1,190 @@
+// Black Hole Studio - exact Schwarzschild geodesic tracer (Cycles OSL).
+//
+// Port of tests/reference_tracer.py::trace_rays.  Units: r_s = 1 (M = 0.5),
+// disk in the object-space XY plane.  Photon orbit equation, u = 1/r:
+//     d^2u/dphi^2 = -u + (3/2) k u^2          (k = lensing strength)
+// integrated with RK4 at fixed dphi.  The camera ray is traced backwards.
+//
+// This shader only does the relativity: it reports where the light path
+// crosses the disk (up to three times: primary, secondary and photon-ring
+// images), the jet light gathered between those crossings, and the asymptotic
+// direction used to look up the background.  The disk itself (temperature,
+// redshift, colour, texture, turbulence) is shaded by shader nodes that      // changed
+// are shared with Fast mode, so images and curves work in both modes.
+//
+// Spin is approximate: light paths are Schwarzschild plus a Lense-Thirring
+// rotation and the Bardeen shadow displacement.
+//
+// Volume mode (fog, thick disk): the add-on sets PATH_SAMPLES > 0 when it loads
+// this file.  The traced path is then also returned as PATH_SAMPLES + 1 points
+// Path0..PathN, evenly spaced in orbital angle, plus the position of every disk
+// crossing along that polyline (HitT, in segment units).  The node graph
+// integrates fog and the thick disk along it - the same code Fast mode uses.
+
+#define PI_ 3.14159265358979
+#ifndef PATH_SAMPLES
+#define PATH_SAMPLES 0
+#endif
+#define PATH_REC 1024
+
+float fbm(point p, int octaves, float rough)
+{
+    float sum = 0.0, amp = 0.5, norm = 0.0;
+    point q = p;
+    for (int i = 0; i < octaves; i++) {
+        sum += amp * (noise("perlin", q));
+        norm += amp;
+        amp *= rough;
+        q *= 2.03;
+    }
+    return sum / max(norm, 1e-6);
+}
+
+point rot_z(point p, float a)
+{
+    float c = cos(a), s = sin(a);
+    return point(c * p[0] - s * p[1], s * p[0] + c * p[1], p[2]);
+}
+
+shader blackhole_geodesic(
+    float Scale = 1.0,                 // object-space units per r_s
+    int StepsPerOrbit = 256,
+    float MaxOrbits = 3.0,
+    float Strength = 1.0,              // lensing strength (1 = GR)
+    float ExitRadius = 30.0,
+    float Bound = 30.0,                // influence radius (r_s)
+    float EdgeFade = 0.5,              // fraction of the radius over which bending fades out
+    float Hovering = 0.0,              // 1: the camera is a static (hovering) observer
+    float Spin = 0.0,
+    float FrameDrag = 1.0,
+    float ShadowShift = 1.0,
+    float RotationSign = 1.0,
+    float Time = 0.0,
+    float NoiseSpeed = 1.0,
+
+    float DiskEnable = 1.0,
+    float DiskInner = 3.0,
+    float DiskOuter = 12.0,
+    float OuterSoftness = 0.3,
+
+    float JetEnable = 0.0,
+    float JetLength = 20.0,
+    float JetAngle = 0.08,
+    float JetBase = 0.4,
+    float JetIntensity = 1.0,
+    float JetNoise = 0.5,
+    color JetColor = color(0.4, 0.6, 1.0),
+
+    output vector Hit1 = 0,
+    output vector Hit2 = 0,
+    output vector Hit3 = 0,
+    output float Valid1 = 0,
+    output float Valid2 = 0,
+    output float Valid3 = 0,
+    output color Jet0 = 0,             // jet light in front of the first crossing
+    output color Jet1 = 0,             // ... between crossings 1 and 2
+    output color Jet2 = 0,
+    output color Jet3 = 0,             // ... behind the third crossing
+    output float HitT1 = 0,            // crossing positions along Path, in segments
+    output float HitT2 = 0,
+    output float HitT3 = 0,
+    /*@PATH_DECL@*/
+
+    output float Lz = 0,               // photon angular momentum along the disk rotation
+    output float Escaped = 1,
+    output float Pass = 0,             // 1: see-through (the inside of the sphere seen from outside)
+    output float Gamma = 1,            // hovering observer's frequency factor
+    output vector ExitDir = 0,
+    output float ImpactParameter = 0)
+{
+
+    // Cycles passes I pointing back toward the viewer (sd->wi), so the ray travels along -I
+    // The path is traced from the ray's origin (the camera), inside or outside
+    // the sphere, so its bending is exact GR from the camera to infinity.  A back
+    // face hit from outside (a ray refracted through the sphere) is see-through.
+    vector d_world = -normalize(I);
+    point origin_world = P;
+    float len = 0.0;
+    if (getattribute("path:ray_length", len))
+        origin_world = P - d_world * len;
+
+    if (backfacing() && length(transform("object", origin_world) / Scale) >= 0.999 * Bound) {
+        Pass = 1; ExitDir = d_world;
+        return;
+    }
+
+    point o = transform("object", origin_world) / Scale;
+    vector d = normalize(transform("object", d_world));
+    vector d_start = d;
+    vector zax = vector(0, 0, 1);
+    float spin = clamp(Spin, -0.998, 0.998);
+
+    // Bardeen shadow displacement (approx.): shift ~ a sin(i) r_s toward the receding side
+    o += ShadowShift * spin * RotationSign * cross(zax, d);
+
+    float r0 = length(o);
+    float r_h = 0.5 * (1.0 + sqrt(1.0 - spin * spin));
+    float k = Strength;
+    if (Hovering > 0.0) {
+        float rr = clamp(r0, 1.0001, Bound);
+        Gamma = sqrt(max(1.0 - k / Bound, 1e-6) / max(1.0 - k / rr, 1e-6));
+    }
+    if (r0 <= r_h) {
+        Escaped = 0; ExitDir = d_world;
+        return;
+    }
+
+    vector e1 = o / r0;
+    vector nrm = cross(o, d);
+    float b_geo = length(nrm);
+    if (b_geo < 1e-7) nrm = cross(e1, vector(0.577, 0.577, 0.577));
+    nrm = normalize(nrm);
+    vector e2 = cross(nrm, e1);
+
+    float cos_a = dot(d, e1);
+    float sin_a = max(dot(d, e2), 1e-7);
+    float uu = 1.0 / r0;
+    // the ray leaves along the camera direction in Schwarzschild coordinates;
+    // a hovering observer measures the angle in its own frame instead
+    float ud = -cos_a / sin_a / r0;
+    float s2 = sin_a * sin_a;
+    if (Hovering > 0.0) {
+        ud *= sqrt(max(1.0 - k * uu, 1e-6));
+        s2 = 1.0;
+    }
+
+    float b_ratio = 1.0 / sqrt(max(1.0 - k * uu * s2, 1e-6));
+    float b = b_geo * b_ratio;
+    ImpactParameter = b;
+    Lz = -dot(cross(o, d), zax) * RotationSign * b_ratio;
+
+    float h = 2.0 * PI_ / max(StepsPerOrbit, 16);
+    // + half an orbit for the stretches outside the sphere (camera -> sphere -> far away)
+    int max_steps = (int)(max(StepsPerOrbit, 16) * (MaxOrbits + 0.5));
+    float c = 1.5 * k;
+    float u_h = 1.0 / r_h;
+    float u_exit = 1.0 / ExitRadius;
+    float u_far = 1e-4;                // "infinity": the bent direction is read off here
+    float r_disk_max = DiskOuter * (1.0 + OuterSoftness);
+
+    color jets[4] = { color(0), color(0), color(0), color(0) };
+    int crossings = 0;
+    int escaped = 0;
+    float hit_step[3] = { 0, 0, 0 };
+    // the part of the path inside the sphere: from step i_in (0 if the camera is inside)
+    int inside = r0 < ExitRadius;
+    int left = 0;
+    float i_in = 0.0;
+
+    #if PATH_SAMPLES > 0
+    point rec[PATH_REC];
+    rec[0] = o;
+    int n_rec = inside;
+    int stride = max(1, (int)ceil((float)max_steps / (PATH_REC - 2)));
+    float last_rec_step = 0.0;
+#endif
+
+    float phi = 0.0;
+    float psi = 0.0;     // accumulated frame-dragging rotation
+    point prev = o;
+    vector exit_dir = d;
