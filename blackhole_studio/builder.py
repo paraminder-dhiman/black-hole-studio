@@ -313,7 +313,9 @@ def apply(root):
 
 def setup_world(scene, root):
     world = scene.world
-    if world is None:
+    if world is None or not world.get(WORLD_TAG):
+        if world is not None:
+            world.use_fake_user = True      # keep the user's own World in the file
         world = bpy.data.worlds.new("BHS Sky")
         scene.world = world
     materials.build_world(world)

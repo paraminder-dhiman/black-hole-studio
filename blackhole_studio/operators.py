@@ -23,7 +23,7 @@ class BHS_OT_add(bpy.types.Operator):
                                                   ("EXACT", "Exact (Cycles OSL)", "")],
                        default="FAST")
     setup_world: BoolProperty(name="Starfield World", default=True,
-                              description="Replace the world with the matching lensed starfield")
+                              description="Use a matching lensed starfield World (your current World is kept)")
     setup_camera: BoolProperty(name="Frame Camera", default=True,
                                description="Point the scene camera at the black hole")
     setup_render: BoolProperty(name="Configure Render", default=True,
@@ -111,7 +111,7 @@ class BHS_OT_frame_camera(_NeedsBlackHole, bpy.types.Operator):
         return {"FINISHED"}
 
 class BHS_OT_setup_world(_NeedsBlackHole, bpy.types.Operator):
-    """Replace the world with the skybox/starfield that the black hole lenses"""
+    """Switch the scene to a World with the skybox/starfield that the black hole lenses (the current World is kept)"""
     bl_idname = "blackhole.setup_world"
     bl_label = "Use Matching World"
     bl_options = {"REGISTER", "UNDO"}
