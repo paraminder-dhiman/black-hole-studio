@@ -363,3 +363,104 @@ def build_disk_group(name):
 
     emission = g.mul(col, bright * p("EmissionStrength", 1.0) * i["Boost"] * tex_emission)
     return _finish_group(group, g, gout, {"Emission": emission, "Alpha": alpha})
+
+def build_fog_group(name):
+    """Fog at the midpoint of one path segment (see volume.py for the maths).
+
+    Inputs:  Pos (r_s), Ds (segment length), Time
+    Outputs: Glow (scalar, already x ds; the colour is applied once by the
+             compositor), Tau (extinction optical depth)
+    """
+    group, g, i, gout = _new_group(
+        FOG_GROUP_PREFIX + name,
+        [("Pos", "NodeSocketVector"), ("Ds", "NodeSocketFloat"), ("Time", "NodeSocketFloat")],
+        [("Glow", "NodeSocketFloat"), ("Tau", "NodeSocketFloat")])
+
+    p = g.param
+    x, y, z = g.xyz(i["Pos"])
+    rc = g.max(g.sqrt(x * x + y * y), 1e-4)
+    r = g.max(g.sqrt(x * x + y * y + z * z), 1e-4)
+    r_in = p("DiskInner", 3.0)
+    hf = g.max(p("FogHeight", 0.15) * rc * ((rc / r_in) ** p("DiskFlare", 0.0)), 1e-3)
+
+    halo = p("FogHalo", 0.25)
+    disk_part = g.exp(-0.5 * (z / hf) * (z / hf))
+    halo_part = g.min(r_in / r, 1.0) ** p("HaloFalloff", 1.5)
+    shape = (1.0 - halo) * disk_part + halo * halo_part
+
+    inner, outer = p("FogInner", 2.0), p("FogOuter", 22.0)
+    window = g.smoothstep(inner, inner * 1.3, r) * \
+        (1.0 - g.smoothstep(outer * (1.0 - p("FogFalloff", 0.5)), outer, r))
+
+    # Turbulence that orbits at the local Keplerian rate
+    omega, _ = _keplerian(g, rc, p("Spin", 0.0))
+    ang = -omega * p("RotationSign", 1.0) * i["Time"] * p("FogSwirl", 1.0)
+    ca, sa = g.cos(ang), g.sin(ang)
+    rot = g.vec(ca * x - sa * y, sa * x + ca * y, z * 2.0)
+
+    n = g.noise(rot, scale=p("FogNoiseScale", 0.35), detail=p("FogNoiseDetail", 4.0), roughness=0.55)
+    noise = g.lerp(1.0, g.smoothstep(0.3, 0.75, n) * 2.0, p("FogNoise", 0.6))
+
+    rho = p("FogDensity", 0.05) * window * shape * noise * p("FogEnable", 0.0)
+    ds = i["Ds"]
+    tau = rho * p("FogAbsorption", 1.0) * ds
+    lit = g.min((r_in / r) * (r_in / r), 1.0)
+    glow = rho * p("FogGlow", 2.0) * lit * ds
+    return _finish_group(group, g, gout, {"Glow": glow, "Tau": tau})
+
+def _fog_color(g):
+    """Fog glow colour: the disk's peak blackbody blended with Fog Color."""
+    p = g.param
+    bb = g.blackbody(p("PeakTemp", 7000.0))
+    disk_col = g.div(bb, g.max(g.luminance(bb), 1e-4))
+    return g.lerp(disk_col, _color(g, "FogColor"), p("FogColorMix", 0.5))
+
+def _call(g, group, **inputs):
+    node = g.node("ShaderNodeGroup")
+    node.node_tree = group
+    for key, value in inputs.items():
+        g._set(node.inputs[key], value)
+    return node
+
+# --------------------------------------------------------------------------
+# Compositing shared by both modes
+# --------------------------------------------------------------------------
+
+def _glow(g, b, trans):
+    """Artistic glow around the shadow edge, behind everything the ray passed."""
+    p = g.param
+    b_sh = physics.CRITICAL_IMPACT * (1.0 - 0.067 * g.abs(p("Spin", 0.0)))
+    width = g.max(p("RingGlowWidth", 0.15), 1e-3)
+    xg = (b - b_sh) / width
+    glow = g.mul(_color(g, "RingGlowColor"), p("RingGlow", 0.0) * g.exp(-xg * xg))
+
+    inside = g.lt(b, b_sh)
+    hglow = g.mul(_color(g, "HorizonGlowColor"),
+                  p("HorizonGlow", 0.0) * inside * g.exp(-(b_sh - b) / (width * 2.0)))
+    return g.mul(g.add(glow, hglow), trans)
+
+def _thin_layers(g, disk_group, hits, lz, shift):
+    """(emission, alpha) of each thin-disk crossing, via the disk group."""
+    layers = []
+    for k, (hit, valid) in enumerate(hits):
+        g.next_column()
+        node = _call(g, disk_group, Hit=hit, Lz=lz, Time=g.param("Time", 0.0), Shift=shift,
+                     Boost=1.0 if k == 0 else g.param("PhotonRingBoost", 1.0))
+        layers.append((Sock(g, node.outputs["Emission"], True), Sock(g, node.outputs["Alpha"]) * valid))
+    return layers
+
+def _composite_thin(g, disk_group, hits, lz, b, shift, jets=None):
+    """Thin disk, no volume: up to three crossings front to back, plus jets and glow.
+
+    jets: optional [light before crossing 1, between 1-2, 2-3, behind 3]
+    Returns (emitted colour, glow colour, remaining transmittance).
+    """
+    acc = jets[0] if jets else None
+    trans = 1.0
+    for k, (em, a) in enumerate(_thin_layers(g, disk_group, hits, lz, shift)):
+        layer = g.mul(em, a if k == 0 else trans * a)
+        acc = layer if acc is None else g.add(acc, layer)
+        trans = 1.0 - a if k == 0 else trans * (1.0 - a)
+        if jets and jets[k + 1] is not None:
+            acc = g.add(acc, g.mul(jets[k + 1], trans))
+    return acc, _glow(g, b, trans), trans
