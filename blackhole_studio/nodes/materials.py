@@ -274,3 +274,92 @@ def _keplerian(g, r, spin):
     omega = 2.0 / (rm15 + spin)
     ut = (rm15 + spin) / ((rm ** 0.75) * g.sqrt(g.max(rm15 - 3.0 * g.sqrt(rm) + 2.0 * spin, 1e-4)))
     return omega, ut
+
+def build_disk_group(name):
+    """Disk shading at one point of the disk plane.
+
+    Inputs:  Hit (r_s, z ignored), Lz (photon angular momentum), Boost, Time,
+             Shift (observer frequency factor, 1 unless Hovering Observer)
+    Outputs: Emission (colour, before opacity), Alpha (thin-disk opacity)
+    Thin-disk temperature, exact redshift g, blackbody/artistic colour,
+    procedural turbulence, dust lanes, the disk texture and the edges."""
+
+    group, g, i, gout = _new_group(
+        DISK_GROUP_PREFIX + name,
+        [("Hit", "NodeSocketVector"), ("Lz", "NodeSocketFloat"), ("Boost", "NodeSocketFloat"),
+         ("Time", "NodeSocketFloat"), ("Shift", "NodeSocketFloat")],
+        [("Emission", "NodeSocketColor"), ("Alpha", "NodeSocketFloat")])
+
+    p = g.param
+    spin = p("Spin", 0.0)
+    sign = p("RotationSign", 1.0)
+    r_in = p("DiskInner", 3.0)
+    r_out = p("DiskOuter", 12.0)
+    t_peak = p("PeakTemp", 7000.0)
+    q = p("TempExponent", 0.75)
+
+    s_pk = 8.0 * q / (8.0 * q + 1.0)
+    shape_max = _temp_shape(g, 1.0 / (s_pk * s_pk), q)
+    time = i["Time"]
+    noise_time = time * p("NoiseSpeed", 1.0)
+
+    hx, hy, _ = g.xyz(i["Hit"])
+    r = g.max(g.sqrt(hx * hx + hy * hy), 1e-3)
+    temp = t_peak * _temp_shape(g, r / r_in, q) / shape_max
+    omega, ut = _keplerian(g, r, spin)
+
+    g_grav = 1.0 / ut
+    g_dop = 1.0 / g.max(1.0 - omega * i["Lz"], 0.05)
+    gfac = (g_grav ** p("Gravity", 1.0)) * (g_dop ** p("Doppler", 1.0)) * i["Shift"]
+    t_obs = temp * g.lerp(1.0, gfac, p("ColorShift", 1.0))
+
+    bb = g.blackbody(t_obs)
+    phys = g.div(bb, g.max(g.luminance(bb), 1e-4))
+    tn = g.clamp01(temp / t_peak)
+    hi = g.lerp(_color(g, "ColorMid"), _color(g, "ColorInner"), g.clamp01((tn - 0.5) * 2.0))
+    lo = g.lerp(_color(g, "ColorOuter"), _color(g, "ColorMid"), g.clamp01(tn * 2.0))
+    art = g.lerp(lo, hi, g.gt(tn, 0.5))
+    col = g.lerp(art, phys, p("PhysicalMix", 1.0))
+
+    bright = g.max(gfac * temp / t_peak, 0.0) ** p("BrightnessExponent", 4.0)
+
+    # Differentially rotating procedural turbulence (Keplerian shear)
+    lr = g.log(r)
+    ang = g.atan2(hy, hx) - omega * sign * noise_time + p("Shear", 2.0) * lr
+    nvec = g.mul(g.vec(g.cos(ang) * lr * 3.0, g.sin(ang) * lr * 3.0, lr * 0.5), p("NoiseScale", 1.5))
+    n = g.noise(nvec, scale=1.0, detail=p("NoiseDetail", 5.0), roughness=p("NoiseRoughness", 0.55))
+
+    dens = g.lerp(1.0, g.smoothstep(0.15, 0.85, n) * 1.6, p("NoiseContrast", 0.6))
+    lanes = 0.5 + 0.5 * g.sin(r * p("DustScale", 4.0) + 3.0 * g.noise(g.mul(nvec, 0.7), detail=3.0))
+    dens = dens * g.lerp(1.0, g.smoothstep(0.2, 0.8, lanes), p("DustLanes", 0.0))
+
+    # Disk texture: top-down map, fixed rotation plus optional rigid/Keplerian motion
+    motion = p("TextureMotion", 0.0)                     # 0 static, 1 rigid, 2 Keplerian
+    rigid = g.math("COMPARE", motion, 1.0, 0.5)
+    kepler = g.math("COMPARE", motion, 2.0, 0.5)
+    omega_rigid = 2.0 / (r_out ** 1.5)                   # Keplerian rate at mid-disk (r_out / 2)
+
+    beta = p("TextureRotation", 0.0) + sign * p("TextureSpeed", 1.0) * time * \
+        (rigid * omega_rigid + kepler * omega)
+    cb, sb = g.cos(beta), g.sin(beta)
+    extent = 2.0 * r_out * p("TextureScale", 1.0)
+    u = 0.5 + (cb * hx + sb * hy) / extent
+    v = 0.5 + (cb * hy - sb * hx) / extent
+
+    img = g.node("ShaderNodeTexImage", interpolation="Linear", extension="EXTEND")
+    img.name = img.label = "DiskTexture"
+    img.hide = False
+    g._set(img.inputs["Vector"], g.vec(u, v, 0.0))
+    tex = g.max(g.luminance(Sock(g, img.outputs["Color"], True)), 0.0) ** p("TextureContrast", 1.0)
+
+    on = p("TextureEnable", 1.0)
+    dens = dens * g.lerp(1.0, tex, p("TextureDensity", 1.0) * on)
+    tex_emission = g.lerp(1.0, tex, p("TextureEmission", 0.5) * on)
+
+    soft_o = p("OuterSoftness", 0.3)
+    edge = g.smoothstep(r_in, r_in * (1.0 + p("InnerSoftness", 0.05)), r) * \
+        (1.0 - g.smoothstep(r_out * (1.0 - soft_o), r_out * (1.0 + soft_o), r))
+    alpha = g.clamp01(p("Opacity", 0.95) * dens * edge * p("DiskEnable", 1.0))
+
+    emission = g.mul(col, bright * p("EmissionStrength", 1.0) * i["Boost"] * tex_emission)
+    return _finish_group(group, g, gout, {"Emission": emission, "Alpha": alpha})
