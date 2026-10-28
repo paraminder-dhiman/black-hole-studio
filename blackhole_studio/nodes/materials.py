@@ -11,8 +11,7 @@ share one output stage:
 
 Exact mode gets them from the OSL geodesic integrator, Fast mode from a
 precomputed geodesic table (see lut.py) evaluated with ordinary math nodes,
-which runs on GPU and in Eevee.
-"""
+which runs on GPU and in Eevee."""
 
 import math
 import os
@@ -123,3 +122,155 @@ def build_world(world):
     out = tree.nodes.new("ShaderNodeOutputWorld")
     out.location = (g.x0 + 1400, 0)
     tree.links.new(bg.outputs[0], out.inputs["Surface"])
+
+# --------------------------------------------------------------------------
+# Shared output stage
+# --------------------------------------------------------------------------
+
+def _output(g, tree, disk, glow, trans, esc, exit_dir, passthrough, boost):
+    """passthrough: 1 where the sphere must be invisible (its inside seen from
+    outside, e.g. by a ray refracted through it); boost: hovering-observer
+    colour factor for the background."""
+    geo = g.node("ShaderNodeNewGeometry")
+    d_world = g.normalize(-Sock(g, geo.outputs["Incoming"], True))
+    g.next_column()
+
+    hsv = g.node("ShaderNodeHueSaturation")
+    g._set(hsv.inputs["Color"], g.add(disk, glow))
+    g._set(hsv.inputs["Hue"], g.param("Hue", 0.5))
+    g._set(hsv.inputs["Saturation"], g.param("Saturation", 1.0))
+    styled = Sock(g, hsv.outputs["Color"], True)
+
+    bg = _background(g, exit_dir)
+    sky = g.mul(g.mul(bg, boost), trans * esc * g.param("BgStrength", 1.0))
+    front_col = g.add(styled, sky)
+
+    emit_all = g.node("ShaderNodeEmission")
+    g._set(emit_all.inputs["Color"], front_col)
+    emit_all.inputs["Strength"].default_value = 1.0
+
+    # "Lens scene objects": steer a refraction with a synthetic normal so the
+    # transmitted ray leaves exactly along the bent direction. Snell gives
+    # N ~ d - eta d' (eta = 4 allows deflections up to ~75 deg); larger
+    # deflections fall back to the skybox/starfield lookup.
+    eta = 4.0
+    normal = g.normalize(g.sub(d_world, g.mul(exit_dir, eta)))
+    refr = g.node("ShaderNodeBsdfRefraction", distribution="GGX")
+    refr.inputs["Roughness"].default_value = 0.0
+    refr.inputs["IOR"].default_value = eta
+    refr.inputs["Color"].default_value = (1, 1, 1, 1)
+    g._set(refr.inputs["Normal"], normal)
+
+    emit_disk = g.node("ShaderNodeEmission")
+    g._set(emit_disk.inputs["Color"], styled)
+    black = g.node("ShaderNodeEmission")
+    black.inputs["Strength"].default_value = 0.0
+    weighted = g.node("ShaderNodeMixShader")
+    g._set(weighted.inputs[0], trans * esc)
+    tree.links.new(black.outputs[0], weighted.inputs[1])
+    tree.links.new(refr.outputs[0], weighted.inputs[2])
+    lens = g.node("ShaderNodeAddShader")
+    tree.links.new(emit_disk.outputs[0], lens.inputs[0])
+    tree.links.new(weighted.outputs[0], lens.inputs[1])
+
+    steerable = g.gt(g.dot(d_world, exit_dir), 1.0 / eta + 0.02)
+
+    choose = g.node("ShaderNodeMixShader")
+    g._set(choose.inputs[0], g.param("LensObjects", 0.0) * steerable)
+    tree.links.new(emit_all.outputs[0], choose.inputs[1])
+    tree.links.new(lens.outputs[0], choose.inputs[2])
+
+    transp = g.node("ShaderNodeBsdfTransparent")
+    final = g.node("ShaderNodeMixShader")
+    g._set(final.inputs[0], passthrough)
+    tree.links.new(choose.outputs[0], final.inputs[1])
+    tree.links.new(transp.outputs[0], final.inputs[2])
+
+    out = tree.nodes.new("ShaderNodeOutputMaterial")
+    out.location = (g.x0 + (g._col + 2) * 180, 0)
+    tree.links.new(final.outputs[0], out.inputs["Surface"])
+
+# --------------------------------------------------------------------------
+# Where the light path starts, and the hovering observer
+# --------------------------------------------------------------------------
+
+def _ray_origin(g):
+    """World-space origin of the ray being shaded.
+
+    Cycles: exact for every ray (shading point minus the ray length).  Where
+    the ray length is unavailable (Eevee), the camera position."""
+    geo = g.node("ShaderNodeNewGeometry")
+    pos = Sock(g, geo.outputs["Position"], True)
+    d = g.normalize(-Sock(g, geo.outputs["Incoming"], True))
+    path = g.node("ShaderNodeLightPath")
+    length = Sock(g, path.outputs["Ray Length"])
+    cam = g.transform((0.0, 0.0, 0.0), "CAMERA", "WORLD", "POINT")
+    traced = g.sub(pos, g.mul(d, length))
+    return g.lerp(cam, traced, g.gt(length, 0.0))
+
+def _observer_boost(g, gamma):
+    """Colour factor for light without its own spectrum (sky, fog, jets) seen
+    by a hovering observer: bolometric gamma^4 and a blackbody-like tint."""
+    ref = g.blackbody(6500.0)
+    hot = g.blackbody(6500.0 * gamma)
+    tint = g.div(g.div(hot, g.max(g.luminance(hot), 1e-4)), g.div(ref, g.max(g.luminance(ref), 1e-4)))
+    return g.mul(tint, gamma * gamma * gamma * gamma)
+
+# --------------------------------------------------------------------------
+# Per-black-hole node groups: disk sample and fog sample
+# --------------------------------------------------------------------------
+#
+# The groups hold their own named Value/RGB parameter nodes (builder.apply
+# writes into them like into the material) and are rebuilt with the shader,
+# so they carry no user data.  Each is instanced once per disk crossing or
+# per path segment.
+
+DISK_GROUP_PREFIX = "BHS Disk "
+FOG_GROUP_PREFIX = "BHS Fog "
+GROUP_VERSION = 1
+
+_COLOR_DEFAULTS = {"ColorInner": (1.0, 0.95, 0.85, 1), "ColorMid": (1.0, 0.55, 0.15, 1),
+                   "ColorOuter": (0.6, 0.12, 0.02, 1), "RingGlowColor": (1.0, 0.7, 0.4, 1),
+                   "HorizonGlowColor": (1.0, 0.4, 0.1, 1), "JetColor": (0.4, 0.6, 1.0, 1),
+                   "FogColor": (0.55, 0.42, 0.36, 1)}
+
+
+def _color(g, name):
+    return g.color_param(name, _COLOR_DEFAULTS[name])
+
+def _temp_shape(g, x, q):
+    x = g.max(x, 1.0001)
+    return (x ** -q) * ((1.0 - x ** -0.5) ** 0.25)
+
+def _new_group(name, inputs, outputs):
+    old = bpy.data.node_groups.get(name)
+    if old is not None:
+        bpy.data.node_groups.remove(old)
+    group = bpy.data.node_groups.new(name, "ShaderNodeTree")
+    group["bhs_version"] = GROUP_VERSION
+    for sock_name, kind in inputs:
+        group.interface.new_socket(sock_name, in_out="INPUT", socket_type=kind)
+    for sock_name, kind in outputs:
+        group.interface.new_socket(sock_name, in_out="OUTPUT", socket_type=kind)
+
+    g = Graph(group)
+    gin = group.nodes.new("NodeGroupInput")
+    gin.location = (-600, 200)
+    gout = group.nodes.new("NodeGroupOutput")
+    vec = {n for n, k in inputs if k in ("NodeSocketVector", "NodeSocketColor")}
+    ins = {n: Sock(g, gin.outputs[n], n in vec) for n, _ in inputs}
+    return group, g, ins, gout
+
+def _finish_group(group, g, gout, outputs):
+    for sock_name, value in outputs.items():
+        group.links.new(value.socket, gout.inputs[sock_name])
+    gout.location = (g.x0 + (g._col + 2) * 180, 0)
+    return group
+
+def _keplerian(g, r, spin):
+    """Omega and u^t of an equatorial circular orbit at r (r_s units)."""
+    rm = 2.0 * r
+    rm15 = rm ** 1.5
+    omega = 2.0 / (rm15 + spin)
+    ut = (rm15 + spin) / ((rm ** 0.75) * g.sqrt(g.max(rm15 - 3.0 * g.sqrt(rm) + 2.0 * spin, 1e-4)))
+    return omega, ut
