@@ -5,7 +5,7 @@ name = "Black Hole Studio"
 tagline = "Black holes with real light bending and artistic control"
 maintainer = "Paraminder Dhiman <paramindersd@gmail.com>"
 type = "add-on"
-webiste = "https://github.come/paraminder-dhiman/black-hole-studio"
+website = "https://github.com/paraminder-dhiman/black-hole-studio"
 
 tags = ["Render", "Material", "Object"]
 
