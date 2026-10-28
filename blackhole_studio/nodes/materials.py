@@ -652,3 +652,83 @@ def _composite_volume(g, step_group, point_at, n_seg, layers, hit_t, b, jets, th
             if jets[k] is not None:
                 acc = g.add(acc, g.mul(jets[k], trans))
     return acc, _glow(g, b, trans), trans
+
+def ensure_osl_text(path_samples=0):
+    """The OSL source with PATH_SAMPLES path outputs; one text per sample count."""
+    with open(SHADER_PATH, "r", encoding="utf-8") as f:
+        src = f.read()
+    n = int(path_samples)
+
+    if n > 0:
+        decl = "\n    ".join(f"output vector Path{j} = 0," for j in range(n + 1))
+
+        assign = []
+        for j in range(n + 1):
+            assign.append(
+                f"{{ float f = clamp(({j}.0 + {'0.0' if j in (0, n) else 'jitter'}) * span / {n}.0, 0.0, span); "
+                f"int i0 = min((int)floor(f), n_rec - 1); "
+                f"int i1 = min(i0 + 1, n_rec - 1); "
+                f"Path{j} = vector(mix(rec[i0], rec[i1], f - i0)); }}")
+
+        src = src.replace("/*@PATH_DECL@*/", decl).replace("/*@PATH_ASSIGN@*/", "\n    ".join(assign))
+        src = f"#define PATH_SAMPLES {n}\n" + src
+
+    name = OSL_TEXT if n == 0 else OSL_TEXT.replace(".osl", f" {n}.osl")
+    txt = bpy.data.texts.get(name)
+    if txt is None:
+        txt = bpy.data.texts.new(name)
+    if txt.as_string() != src:
+        txt.from_string(src)
+    return txt
+
+def build_exact(mat, disk_group, step_group=None, volume_samples=0, thick=False):
+    _enable_nodes(mat)
+    tree = mat.node_tree
+    tree.nodes.clear()
+    g = Graph(tree)
+    script = tree.nodes.new("ShaderNodeScript")
+    script.name = "Geodesic"
+    script.mode = "INTERNAL"
+    script.script = ensure_osl_text(volume_samples)
+
+    try:  # Compile now so the sockets exist (needs Cycles + OSL)
+        import cycles.osl
+        cycles.osl.update_script_node(script, lambda *a: None)
+    except Exception:  # Pragma: no cover - Cycles unavailable
+        pass
+    script.location = (g.x0 - 200, 300)
+    if "Hit1" not in script.outputs:
+        raise RuntimeError("Could not compile the OSL geodesic shader (is Cycles enabled?)")
+
+    # Every shader input is driven by a named Value/RGB node, like in Fast mode
+    for sock in script.inputs:
+        if sock.type == "RGBA":
+            src = _color(g, sock.name)
+        else:
+            src = g.param(sock.name, float(sock.default_value))
+        tree.links.new(src.socket, sock)
+
+    def out(name, vec=False):
+        return Sock(g, script.outputs[name], vec)
+
+    hits = [(out(f"Hit{k}", True), out(f"Valid{k}")) for k in (1, 2, 3)]
+    gamma = out("Gamma")
+    boost = _observer_boost(g, gamma)
+    jets = [g.mul(out(f"Jet{k}", True), boost) for k in range(4)]
+
+    if volume_samples:
+        hit_t = [out(f"HitT{k}") for k in (1, 2, 3)]
+        layers = [] if thick else _thin_layers(g, disk_group, hits, out("Lz"), gamma)
+
+        def point_at(j, dep):
+            path = out(f"Path{j}", True)
+            return path if isinstance(dep, float) else g.add(path, g.vec(dep, 0.0, 0.0))
+
+        acc, glow, trans = _composite_volume(g, step_group, point_at, volume_samples, layers,
+                                             hit_t, out("ImpactParameter"), jets, thick, out("Lz"),
+                                             gamma, boost)
+    else:
+        acc, glow, trans = _composite_thin(g, disk_group, hits, out("Lz"), out("ImpactParameter"),
+                                           gamma, jets)
+    _output(g, tree, acc, glow, trans, out("Escaped"), out("ExitDir", True), out("Pass"), boost)
+    return script
