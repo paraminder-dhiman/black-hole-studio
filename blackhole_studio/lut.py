@@ -34,11 +34,11 @@ from . import physics
 
 WIDTH = 1024
 HEIGHT = 512
-THETA_MAX = 3.0 * math.pi     # covers the primary, secondary and tertiary images
+THETA_MAX = 3.0 * math.pi     # Covers the primary, secondary and tertiary images
 SUBSTEPS = 8
 
-# the table covers impact parameters a little beyond the sphere: a ray that
-# enters it tangentially has b = R / sqrt(1 - k / R) > R
+# The table covers impact parameters a little beyond the sphere: a ray that
+# Enters it tangentially has b = R / sqrt(1 - k / R) > R
 B_MAX_FACTOR = 1.05
 
 U_ESCAPED = -0.05
@@ -69,7 +69,7 @@ def periapsis_u(b, strength=1.0):
     lo = np.zeros_like(b)
     hi = np.minimum(np.full_like(b, 1.0), 1.0 / b) if k <= 0 else np.full_like(b, min(2.0 / (3.0 * k), 1.0))
     f_hi = k * hi ** 3 - hi * hi + 1.0 / (b * b)
-    captured = f_hi > 0.0                      # no turning point before the horizon
+    captured = f_hi > 0.0                      # No turning point before the horizon
     for _ in range(60):
         mid = 0.5 * (lo + hi)
         f = k * mid ** 3 - mid * mid + 1.0 / (b * b)
@@ -105,7 +105,7 @@ def weak_pull(phi, b, strength=1.0):
     return kb * np.sin(phi) + 1.875 * kb * kb * (0.5 * phi + 0.25 * np.sin(2.0 * phi))
 
 
-FADE_MIN_RADIUS = 6.0     # the fade never reaches the strongly bent rays near the shadow
+FADE_MIN_RADIUS = 6.0     # The fade never reaches the strongly bent rays near the shadow
 
 def edge_taper(b, bound, fade=0.5):
     """1 for rays through the inner sphere, falling smoothly to 0 at its edge."""
@@ -132,7 +132,7 @@ def compute(bound, strength=1.0, width=WIDTH, height=HEIGHT):
 
     theta = 0.0
     row = 0
-    # incoming branch, for the inverse table: (u, theta) until the turning point
+    # Incoming branch, for the inverse table: (u, theta) until the turning point
     hist_u = [u.copy()]
     hist_t = [0.0]
     for step in range(height * SUBSTEPS):

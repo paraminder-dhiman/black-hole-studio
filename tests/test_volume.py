@@ -16,7 +16,7 @@ def test_normal_cdf_accuracy():
 @pytest.mark.parametrize("h", [0.01, 0.1, 1.0])
 @pytest.mark.parametrize("mu", [1.0, 0.5, 0.1])
 def test_slab_column_matches_numeric_integral(h, mu):
-    # straight segment from z = +2 to z = -2 at inclination mu = |dz/ds|
+    # Straight segment from z = +2 to z = -2 at inclination mu = |dz/ds|
     z0, z1 = 2.0, -2.0
     ds = abs(z1 - z0) / mu
     fine = np.linspace(0, 1, 200001)
@@ -26,10 +26,10 @@ def test_slab_column_matches_numeric_integral(h, mu):
     assert volume.slab_column(z0, z1, h, ds) == pytest.approx(numeric, rel=2e-3, abs=1e-6)
 
 def test_thin_slab_is_never_missed():
-    # a slab 1000x thinner than the segment still gives the full column 1/mu
+    # A slab 1000x thinner than the segment still gives the full column 1/mu
     mu = 0.3
     assert volume.slab_column(1.0, -1.0, 1e-3, 2.0 / mu) == pytest.approx(1.0 / mu, rel=1e-3)
-    # splitting the segment does not change the answer
+    # Splitting the segment does not change the answer
     total = volume.slab_column(1.0, 0.2, 1e-3, 0.8 / mu) + volume.slab_column(0.2, -1.0, 1e-3, 1.2 / mu)
     assert total == pytest.approx(1.0 / mu, rel=1e-3)
 
@@ -46,7 +46,7 @@ def test_fog_transmittance_converges():
         return ab * volume.fog_density(mid, s) * ds
 
     def path(n):
-        # straight edge-on ray through the fog at height 0.4
+        # Straight edge-on ray through the fog at height 0.4
         return [(-30.0 + 60.0 * i / n, 6.0, 0.4) for i in range(n + 1)]
 
     _, t_ref = volume.march(path(20000), tau, lambda m, ds: 0.0)
@@ -59,6 +59,6 @@ def test_fog_window_and_halo():
              inner=3.0, outer=20.0, falloff=0.3)
     assert volume.fog_density((10.0, 0.0, 0.0), s) == pytest.approx(1.0)
     assert volume.fog_density((10.0, 0.0, 5.0), s) < 1e-5          # 5 scale heights above the plane
-    assert volume.fog_density((25.0, 0.0, 0.0), s) == 0.0          # outside
+    assert volume.fog_density((25.0, 0.0, 0.0), s) == 0.0          # Outside
     s["halo"] = 1.0
-    assert volume.fog_density((10.0, 0.0, 5.0), s) > 0.05          # the halo fills it
+    assert volume.fog_density((10.0, 0.0, 5.0), s) > 0.05          # The halo fills it

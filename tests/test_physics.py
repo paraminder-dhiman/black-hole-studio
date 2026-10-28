@@ -16,9 +16,9 @@ def test_schwarzschild_radius_sun():
 
 def test_critical_impact_parameter():
     assert physics.CRITICAL_IMPACT == pytest.approx(2.598, abs=1e-3)
-    # just outside b_c escapes after many windings, just inside is captured
+    # Just outside b_c escapes after many windings, just inside is captured
     assert rt.deflection_angle(physics.CRITICAL_IMPACT * 0.995) is None
-    # strong-deflection limit: alpha ~ -ln(b/b_c - 1) + ln(216(7 - 4 sqrt 3)) - pi
+    # Strong-deflection limit: alpha ~ -ln(b/b_c - 1) + ln(216(7 - 4 sqrt 3)) - pi
     expected = -math.log(0.005) + math.log(216 * (7 - 4 * math.sqrt(3))) - math.pi
     assert rt.deflection_angle(physics.CRITICAL_IMPACT * 1.005, r_start=1e5) == pytest.approx(expected, abs=0.02)
 
@@ -56,12 +56,12 @@ def test_temperature_profile_peak():
 
 def test_redshift_static_limits():
     r = 10.0
-    # photon with no angular momentum: pure gravitational + transverse Doppler
+    # Photon with no angular momentum: pure gravitational + transverse Doppler
     g = physics.redshift_factor(r, 0.0)
     assert g == pytest.approx(math.sqrt(1 - 1.5 / r))
-    # photons moving with the flow are blueshifted, against it redshifted
+    # Photons moving with the flow are blueshifted, against it redshifted
     assert physics.redshift_factor(r, 5.0) > g > physics.redshift_factor(r, -5.0)
-    # disable switches
+    # Disable switches
     assert physics.redshift_factor(r, 5.0, doppler=0.0, gravity=0.0) == 1.0
 
 def test_kepler_omega_schwarzschild():
@@ -78,7 +78,7 @@ def test_lut_mapping_roundtrip():
 
 @pytest.mark.parametrize("b", [3.0, 5.0, 10.0])
 def test_lut_matches_direct_integration(table, b):
-    # total swept angle at escape = pi + deflection
+    # Total swept angle at escape = pi + deflection
     theta_end = lut.sample(table, b, 0.0, 40.0)[1] * lut.THETA_MAX
     assert theta_end == pytest.approx(math.pi + rt.deflection_angle(b, r_start=1e5), abs=0.01)
     # u at theta = pi/2 against a fine direct integration
@@ -90,12 +90,12 @@ def test_lut_matches_direct_integration(table, b):
     assert lut.sample(table, b, math.pi / 2, 40.0)[0] == pytest.approx(u, rel=0.01)
 
 def test_lut_capture_flag(table):
-    # captured orbits store a negative swept angle
+    # Captured orbits store a negative swept angle
     assert lut.sample(table, 1.0, 0.0, 40.0)[1] < 0.0
     assert lut.sample(table, 5.0, 0.0, 40.0)[1] > 0.0
 
 def test_tracer_disk_and_shadow():
-    # camera on the axis looking straight at the hole: centre captured, disk ring visible
+    # Camera on the axis looking straight at the hole: centre captured, disk ring visible
     cam = np.array([[0.0, 0.0, 30.0]] * 3)
     dirs = np.array([[0.0, 0.0, -1.0], [0.25, 0.0, -1.0], [0.6, 0.0, -1.0]])
     dirs /= np.linalg.norm(dirs, axis=1)[:, None]
@@ -126,6 +126,6 @@ def test_nonphysical_detection():
     assert params.nonphysical(s) == []
     s.doppler = 0.0
     s.disk_inner_auto = False
-    s.disk_thickness = 0.2            # beyond the thin-disk limit
+    s.disk_thickness = 0.2            # Beyond the thin-disk limit
     labels = [label for label, _, _ in params.nonphysical(s)]
     assert labels == ["Disk Thickness (thin-disk limit)", "Doppler Beaming", "Inner Edge at ISCO"]
