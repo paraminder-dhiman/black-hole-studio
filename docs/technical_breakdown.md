@@ -274,7 +274,7 @@ z(\theta) = r(\theta)\,\big(A_z\cos\theta + B_z\sin\theta\big)
 r is never zero, so z = 0 exactly where the bracket is zero:
 
 ```math
-\theta_0 = \operatorname{atan2}(-A_z,\;B_z), \qquad \theta_k = \theta_0 + k\pi
+\theta_0 = \mathrm{atan2}(-A_z,\;B_z), \qquad \theta_k = \theta_0 + k\pi
 ```
 
 The crossings do not depend on how much the ray bends, only on the plane it lives in. The bending only decides how far out each crossing is, and that comes from the table.
@@ -433,7 +433,7 @@ The disk and fog must fit inside 90% of the sphere, and jets are capped at its e
 The taper on the bending angle is
 
 ```math
-\psi_{used} = \psi_{GR}\cdot\Big[1 - \operatorname{smoothstep}(r_0,\,R,\,b)\Big], \qquad r_0 = \min\!\big(\max((1-f)R,\;6),\;0.95R\big)
+\psi_{used} = \psi_{GR}\cdot\Big[1 - \mathrm{smoothstep}(r_0,\,R,\,b)\Big], \qquad r_0 = \min\!\big(\max((1-f)R,\;6),\;0.95R\big)
 ```
 
 with R the influence radius and f the Edge Fade. Since the true bending outside 6 r\_s is already small (about 2/b radians, under 20°), scaling it down smoothly is far less visible than cutting it off.
@@ -557,7 +557,7 @@ It does **only** the relativity. The disk's look (temperature, colour, texture, 
 The path is recorded at most 1024 times along the trace. The N + 1 output points are then interpolated from that record at evenly spaced orbital angles, with the same per-pixel jitter as Fast mode:
 
 ```math
-P_j = \operatorname{lerp}\big(\text{rec}[i_0],\,\text{rec}[i_0+1],\,f - i_0\big), \qquad f = \frac{(j + \xi_j)\,\text{span}}{N}
+P_j = \mathrm{lerp}\big(\text{rec}[i_0],\,\text{rec}[i_0+1],\,f - i_0\big), \qquad f = \frac{(j + \xi_j)\,\text{span}}{N}
 ```
 
 with ξ\_j the jitter (0 at both ends, so the path still starts at the camera and ends at the exit point).
